@@ -1,0 +1,4 @@
+# pnpm 11 的依赖构建脚本白名单。
+# esbuild 需要它来安装平台二进制，否则 Vite 起不来。
+allowBuilds:
+  esbuild: true

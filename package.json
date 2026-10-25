@@ -1,0 +1,33 @@
+{
+  "name": "huaben",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,magenta npm:dev:server npm:dev:web",
+    "dev:server": "node --watch src/server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "node src/server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test src/server/assist.test.ts src/server/llm.test.ts src/tavern/card.test.ts src/tavern/preset.test.ts src/tavern/lorebook.test.ts src/tavern/real-card.test.ts src/engine/assembly.test.ts src/engine/parse.test.ts src/engine/tree.test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.6.14",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

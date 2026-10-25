@@ -1,0 +1,44 @@
+# ── 依赖 ──
+node_modules/
+.pnpm-store/
+
+# ── 构建产物 ──
+dist/
+*.tsbuildinfo
+
+# ── 运行时数据 ──
+# 数据库、头像、自动备份都在这里；这是用户自己的东西，不进仓库
+data/
+
+# ── 临时脚本与中间产物 ──
+# 只忽略 .scratch 下的杂项，保留 .scratch/huaben-mvp 里的实施票
+.scratch/*
+!.scratch/huaben-mvp/
+
+# ── 缓存 ──
+.vite/
+.cache/
+coverage/
+
+# ── 日志 ──
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ── 临时文件 ──
+# Windows 上 chokidar 监听到这类文件会 EBUSY 崩溃，顺带也排除
+*.tmp
+*.tmpdir/
+*.PID.*
+
+# ── 密钥与环境 ──
+.env
+.env.*
+!.env.example
+
+# ── 编辑器与系统 ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

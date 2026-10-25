@@ -1,0 +1,45 @@
+{
+  "name": "城南旧事",
+  "entries": {
+    "0": {
+      "uid": 0,
+      "key": ["码头", "十六铺", "卸货"],
+      "keysecondary": ["夜"],
+      "comment": "十六铺的规矩",
+      "content": "十六铺在夜里最忙。苦力按件算钱，管事的老周抽三成，谁也不敢多话。",
+      "constant": false,
+      "selective": true,
+      "selectiveLogic": 0,
+      "order": 20,
+      "position": 0,
+      "depth": 4,
+      "disable": false
+    },
+    "1": {
+      "uid": 1,
+      "key": ["黄包车", "车夫"],
+      "keysecondary": [],
+      "comment": "街面上的眼睛",
+      "content": "这一带的黄包车夫都认得巡捕房的号衣，也认得谁家太太出手阔绰。",
+      "constant": false,
+      "selective": false,
+      "order": 30,
+      "position": 1,
+      "depth": 4,
+      "disable": false
+    },
+    "2": {
+      "uid": 2,
+      "key": [],
+      "keysecondary": [],
+      "comment": "时代底色",
+      "content": "民国二十三年，法租界的梧桐刚落过一场雨，电车线在头顶嗡嗡作响。",
+      "constant": true,
+      "selective": false,
+      "order": 10,
+      "position": 0,
+      "depth": 4,
+      "disable": false
+    }
+  }
+}
