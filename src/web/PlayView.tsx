@@ -51,8 +51,25 @@ function short(text: string, max = 26): string {
  * 但模型输出时用 X。也支持换行、分号、顿号、逗号分隔，并剥掉序号。
  */
 function parseFieldEntries(text: string): Array<{ key: string; hint: string }> {
-  return text
-    .split(/[\n;；,，、]+/)
+  // 先把括号没闭合的行接起来：
+  // 「好感度（数值 0-100」+「每拍最多 +5）」应该算一个字段，不是两个。
+  const merged: string[] = []
+  let pending = ''
+  for (const rawLine of text.split('\n')) {
+    pending = pending ? `${pending}\n${rawLine}` : rawLine
+    const open = (pending.match(/[（(]/g) ?? []).length
+    const close = (pending.match(/[)）]/g) ?? []).length
+    if (open <= close) {
+      merged.push(pending)
+      pending = ''
+    }
+  }
+  if (pending.trim()) merged.push(pending)
+
+  // 带括号的一行就是一个字段（括号里可能本来就有顿号、逗号）；
+  // 不带括号的才按顿号/逗号/分号继续拆。
+  return merged
+    .flatMap((line) => (/[（(]/.test(line) ? [line] : line.split(/[;；,，、]+/)))
     .map((line) =>
       line
         .replace(/^\s*[（(]?\s*\d+\s*[.、)）:：]\s*/, '')
@@ -67,7 +84,7 @@ function parseFieldEntries(text: string): Array<{ key: string; hint: string }> {
       if (displayAs) return { key: displayAs[2].trim(), hint: displayAs[1].trim() }
 
       // 其次认「字段名（填写要求）」：括号里是要求，不是名字
-      const withHint = line.match(/^([^（(]+?)\s*[（(](.+)[)）]\s*$/)
+      const withHint = line.match(/^([^（(]+?)\s*[（(]([\s\S]+)[)）]\s*$/)
       if (withHint) return { key: withHint[1].trim(), hint: withHint[2].trim() }
 
       return { key: line, hint: '' }
