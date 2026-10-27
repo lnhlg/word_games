@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { defaultPreset, parsePreset, BUILTIN_MARKERS } from './preset.ts'
+import { defaultPreset, parsePreset, BUILTIN_MARKERS , extractPrefill } from './preset.ts'
 
 test('解析标准预设：参数、片段、排布顺序', () => {
   const raw = {
@@ -111,4 +111,32 @@ test('默认预设有 12 个槽位，enhanceDefinitions 默认关闭', () => {
   )
   assert.equal(preset.prompts[0].identifier, 'main')
   assert.ok(BUILTIN_MARKERS.has('chatHistory'))
+})
+
+test('从预设里提取 assistant prefill', () => {
+  const preset = {
+    name: 't',
+    params: defaultPreset().params,
+    prompts: [
+      { identifier: 'a', name: 'A', content: '你是作者。\n\nAssistant：OK，', enabled: true },
+    ],
+  } as unknown as Parameters<typeof extractPrefill>[0]
+  assert.equal(extractPrefill(preset), 'OK，')
+})
+
+test('多段都有 prefill 时取最后一句', () => {
+  const preset = {
+    name: 't',
+    params: defaultPreset().params,
+    prompts: [
+      { identifier: 'a', name: 'A', content: 'Assistant：OK，', enabled: true },
+      { identifier: 'b', name: 'B', content: 'Assistant: [Understood.]', enabled: true },
+    ],
+  } as unknown as Parameters<typeof extractPrefill>[0]
+  assert.equal(extractPrefill(preset), '[Understood.]')
+})
+
+test('没有 prefill 时返回空串', () => {
+  const preset = defaultPreset()
+  assert.equal(extractPrefill(preset), '')
 })

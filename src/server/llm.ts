@@ -90,6 +90,7 @@ export async function chatCompletionStream(
   const decoder = new TextDecoder()
   let buffer = ''
   let content = ''
+  let reasoningChars = 0
   let finishReason: string | undefined
   let usage: ChatResult['usage']
 
@@ -115,13 +116,17 @@ export async function chatCompletionStream(
         try {
           const parsed = JSON.parse(payload) as {
             choices?: Array<{
-              delta?: { content?: unknown }
+              delta?: { content?: unknown; reasoning_content?: unknown }
               finish_reason?: unknown
             }>
             usage?: { prompt_tokens?: number; completion_tokens?: number }
           }
 
-          const delta = parsed.choices?.[0]?.delta?.content
+          const deltaObj = parsed.choices?.[0]?.delta
+          const reasoning = deltaObj?.reasoning_content
+          if (typeof reasoning === 'string' && reasoning) reasoningChars += reasoning.length
+
+          const delta = deltaObj?.content
           if (typeof delta === 'string' && delta) {
             content += delta
             onDelta(delta)
@@ -142,10 +147,22 @@ export async function chatCompletionStream(
   }
 
   if (!content.trim()) {
+    const detail =
+      `finish_reason = ${finishReason ?? '未提供'}，` +
+      `completion tokens = ${usage?.completion ?? 0}，` +
+      `reasoning tokens = ${reasoningChars > 0 ? '有（约 ' + reasoningChars + ' 字）' : '无'}`
+
     if (finishReason === 'length') {
-      throw new LlmError('模型输出被截断了（finish_reason = length）。把每拍字数调小一点。')
+      throw new LlmError(
+        `模型输出被截断（${detail}）。额度可能全花在思考上了——调大 max_tokens，或换个不思考的模型。`,
+      )
     }
-    throw new LlmError('模型返回了空内容。')
+    throw new LlmError(
+      `模型返回了空内容（${detail}）。` +
+        (reasoningChars > 0
+          ? '它只输出了思考过程，正文被吃掉了。调大 max_tokens 再试。'
+          : '这个模型这一次什么都没给，重试或换模型。'),
+    )
   }
 
   return { content, finishReason, usage }

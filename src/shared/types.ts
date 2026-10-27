@@ -119,7 +119,12 @@ export interface PlayMessage {
     usage?: { prompt: number; completion: number } | null
     warnings?: string[]
     prompt?: string
+    jailbreak?: string
+    /** 实际发送的消息：system（破甲词/格式/补丁）+ user（素材） */
+    sentMessages?: Array<{ role: string; content: string }>
     state?: GameState | null
+    /** 状态段原文：解析失败时留着排查 */
+    stateRaw?: string
     forks?: Fork[] | null
     /** 重写正文时保留了上一版的岔路 */
     forksFromEarlierVersion?: boolean
@@ -150,6 +155,16 @@ export interface PlaythroughDetail {
   reasoningEffort: string
   /** 破甲提示词：放在 system 最前 */
   jailbreak: string
+  /** 助手预填：模型接着这句写 */
+  prefill: string
+  /** 从预设里自动提取到的 prefill（手填为空时生效） */
+  autoPrefill: string
+  /** 自定义的交付检查文案；空则用内置默认 */
+  deliveryCheck: string
+  /** 自定义的状态累积规则；空则用内置默认 */
+  stateRules: string
+  /** 写作风格提示词 */
+  writingStyle: string
   cast: Array<{ id: string; name: string; materialId: string | null; body: CardBody }>
   messages: PlayMessage[]
 }
@@ -186,6 +201,8 @@ export interface ParsedBeat {
   state?: GameState
   forks?: Fork[]
   warnings: string[]
+  /** 状态段原文，解析失败时留着排查 */
+  stateRaw?: string
 }
 
 export interface MaterialMeta {

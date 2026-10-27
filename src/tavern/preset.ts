@@ -235,3 +235,27 @@ export function normalizePreset(raw: unknown, fallbackName = '未命名预设'):
   }
   return parsePreset(raw, fallbackName).preset
 }
+
+/**
+ * 从预设里找出「助手已经说出口的话」——酒馆的 assistant prefill。
+ *
+ * 越狱预设的典型写法是在段尾放一句 `Assistant：OK，`，
+ * 酒馆把它当成对话的一部分，模型接着它往下写，等于「已经同意了」。
+ * 这里按 prompt 顺序扫，取最后出现的那一句。
+ */
+export function extractPrefill(preset: Preset): string {
+  let found = ''
+
+  for (const prompt of preset.prompts) {
+    if (!prompt.content) continue
+    const matches = [
+      ...prompt.content.matchAll(/^[ \t]*(?:Assistant|assistant|AI)[ \t]*[:：][ \t]*(.+?)[ \t]*$/gm),
+    ]
+    if (matches.length === 0) continue
+
+    const last = matches[matches.length - 1][1].trim()
+    if (last) found = last
+  }
+
+  return found
+}

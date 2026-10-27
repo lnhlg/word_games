@@ -349,6 +349,40 @@ export function updateJailbreak(id: string, jailbreak: string): Promise<{ jailbr
   })
 }
 
+export function updateWritingStyle(
+  id: string,
+  writingStyle: string,
+): Promise<{ writingStyle: string }> {
+  return request(`/api/playthroughs/${id}/style`, {
+    method: 'PUT',
+    body: JSON.stringify({ writingStyle }),
+  })
+}
+
+export function updateStateRules(id: string, stateRules: string): Promise<{ stateRules: string }> {
+  return request(`/api/playthroughs/${id}/state-rules`, {
+    method: 'PUT',
+    body: JSON.stringify({ stateRules }),
+  })
+}
+
+export function updateDeliveryCheck(
+  id: string,
+  deliveryCheck: string,
+): Promise<{ deliveryCheck: string }> {
+  return request(`/api/playthroughs/${id}/delivery`, {
+    method: 'PUT',
+    body: JSON.stringify({ deliveryCheck }),
+  })
+}
+
+export function updatePrefill(id: string, prefill: string): Promise<{ prefill: string }> {
+  return request(`/api/playthroughs/${id}/prefill`, {
+    method: 'PUT',
+    body: JSON.stringify({ prefill }),
+  })
+}
+
 export function updateMessageContent(
   id: string,
   messageId: string,

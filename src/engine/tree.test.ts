@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildForest, buildPath, forkCounts } from './tree.ts'
+import { buildForest, buildPath, collectDescendants, forkCounts } from './tree.ts'
 
 interface Msg {
   id: string
@@ -94,4 +94,27 @@ test('岔口计数标出哪些节点有多个后继', () => {
   assert.equal(counts.get('a'), 2)
   assert.equal(counts.get('b1'), 1)
   assert.equal(counts.get('c1'), undefined)
+})
+
+test('收集后代：线性链上取到后面全部', () => {
+  const ids = collectDescendants(linear, 'a').map((m) => m.id)
+  assert.deepEqual(ids.sort(), ['b', 'c'])
+})
+
+test('收集后代：分叉时两条枝都算', () => {
+  const ids = collectDescendants(forked, 'a').map((m) => m.id)
+  assert.deepEqual(ids.sort(), ['b1', 'b2', 'c1', 'c2'])
+})
+
+test('收集后代：叶子没有后代', () => {
+  assert.deepEqual(collectDescendants(forked, 'c1'), [])
+})
+
+test('收集后代：父指针成环时不会死循环', () => {
+  const cyclic = [
+    { id: 'x', parentId: 'y' },
+    { id: 'y', parentId: 'x' },
+  ]
+  const out = collectDescendants(cyclic, 'x')
+  assert.ok(out.length <= 2)
 })

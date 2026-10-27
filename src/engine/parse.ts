@@ -77,9 +77,49 @@ function parseForks(text: string): Fork[] {
 }
 
 /**
- * 把一次模型输出拆成正文 / 状态 / 岔路。
- * 任意一段缺失或损坏都只降级那一段——正文永远保留。
+ * 宽容地解析模型给的状态 JSON。
+ * 模型常见的毛病：套一层 ```json 代码块、尾随逗号、前后夹带解释文字、
+ * 用中文引号。这些都能救回来，不该直接判定「状态未记录」。
  */
+function parseStateJson(raw: string): { value: unknown; repaired: boolean } | null {
+  let candidate = raw.trim()
+
+  // 去掉 markdown 代码块包裹
+  const fence = candidate.match(/```(?:json|JSON)?\s*([\s\S]*?)```/)
+  if (fence) candidate = fence[1].trim()
+
+  // 只取第一个 { 到最后一个 }，丢掉前后的说明文字
+  const start = candidate.indexOf('{')
+  const end = candidate.lastIndexOf('}')
+  if (start >= 0 && end > start) candidate = candidate.slice(start, end + 1)
+
+  try {
+    return { value: JSON.parse(candidate), repaired: false }
+  } catch {
+    // 继续尝试修复
+  }
+
+  const attempts = [
+    // 去掉对象/数组结尾多余的逗号
+    candidate.replace(/,\s*([}\]])/g, '$1'),
+    // 中文引号换成英文
+    candidate.replace(/[“”]/g, '"').replace(/[‘’]/g, "'"),
+    // 单引号键值换成双引号（粗修，只处理简单的键）
+    candidate.replace(/'([^'\\]*)'\s*:/g, '"$1":'),
+  ]
+
+  for (const attempt of attempts) {
+    try {
+      return { value: JSON.parse(attempt), repaired: true }
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+
 export function parseBeat(raw: string): ParsedBeat {
   const warnings: string[] = []
   const text = raw.trim()
@@ -113,9 +153,11 @@ export function parseBeat(raw: string): ParsedBeat {
   let state: GameState | undefined
   const stateRaw = sections['状态']
   if (stateRaw) {
-    try {
-      state = normalizeState(JSON.parse(stateRaw))
-    } catch {
+    const result = parseStateJson(stateRaw)
+    if (result) {
+      state = normalizeState(result.value)
+      if (result.repaired) warnings.push('状态段的 JSON 有格式问题，已自动修复。')
+    } else {
       warnings.push('状态段不是合法 JSON，这一拍状态未记录。')
     }
   } else {
@@ -130,7 +172,7 @@ export function parseBeat(raw: string): ParsedBeat {
     else warnings.push('岔路段没有解析出有效条目。')
   }
 
-  return { narration: narration || text, state, forks, warnings }
+  return { narration: narration || text, state, forks, warnings, stateRaw }
 }
 
 /** 流式显示时只要正文：把后面的状态与岔路切掉。 */
@@ -146,6 +188,9 @@ const REFUSAL_PATTERNS = [
   /I am programmed to be/i,
   /my safety guidelines/i,
   /As an AI (?:language )?model/i,
+  /Your prompt requests/i,
+  /requests the generation of/i,
+  /I(?:'|’)m not able to (?:help|assist|create|generate)/i,
   /我无法(?:满足|提供|协助|生成|继续)/,
   /作为(?:一个)?\s*AI/,
   /抱歉[，,]?\s*我(?:不能|无法)/,
@@ -158,11 +203,13 @@ const REFUSAL_PATTERNS = [
 export function detectRefusal(text: string): string | null {
   const trimmed = text.trim()
   if (!trimmed) return null
-  // 正常一拍是 400–900 字；拒答通常很短
-  if (trimmed.length > 600) return null
+
+  // 只看开头：拒答一定在起手处，正文里角色说「我不能」不会出现在第一句。
+  // 早先按全文长度判断，829 字的拒答（模型会解释一大段）就漏掉了。
+  const head = trimmed.slice(0, 240)
 
   for (const pattern of REFUSAL_PATTERNS) {
-    if (pattern.test(trimmed)) return trimmed
+    if (pattern.test(head)) return trimmed
   }
   return null
 }

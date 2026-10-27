@@ -7,8 +7,8 @@ import { chatCompletion, chatCompletionStream, LlmError } from './llm.ts'
 import type { ReasoningEffort } from './llm.ts'
 import { assemble, DEFAULT_BUDGET_CHARS, type HistoryMessage } from '../engine/assembly.ts'
 import { detectRefusal, parseBeat, parseForksFromText } from '../engine/parse.ts'
-import { buildPath } from '../engine/tree.ts'
-import { normalizePreset } from '../tavern/preset.ts'
+import { buildPath, collectDescendants } from '../engine/tree.ts'
+import { extractPrefill, normalizePreset } from '../tavern/preset.ts'
 import { parseLorebook } from '../tavern/lorebook.ts'
 import type { CardBody, CastTemplates } from '../shared/types.ts'
 
@@ -27,6 +27,10 @@ interface PlaythroughRow {
   model_override: string | null
   reasoning_effort: string | null
   jailbreak: string | null
+  prefill: string | null
+  delivery_check: string | null
+  state_rules: string | null
+  writing_style: string | null
   created_at: number
   updated_at: number
 }
@@ -43,6 +47,28 @@ function providerFor(row: PlaythroughRow): LlmProvider | null {
     }
   }
   return activeProvider()
+}
+
+
+/**
+ * 内置的交付检查文案；对局里可以整段覆盖。
+ * wantsFirstPerson 由本局规则里是否出现「第一人称」自动决定。
+ */
+function defaultDeliveryCheck(hasTemplates: boolean, wantsFirstPerson: boolean): string {
+  return [
+    '【交付检查（最后读一遍）】',
+    '你的回复必须同时包含【正文】【状态】【岔路】三段，一段都不能少。',
+    '如果只写了正文，这次回复就是不合格的。',
+    '写完后自己确认一遍：【状态】里是不是合法 JSON？【岔路】是不是恰好三条？',
+    ...(hasTemplates ? ['【状态】里每个勾选的角色都要回报，即使不在场也要给值，一个都不能漏。'] : []),
+    ...(wantsFirstPerson
+      ? [
+          '本局规定用第一人称：正文必须以「我」为叙述者。',
+          '禁止出现「黄蓉把…」「黄蓉说…」这类第三人称叙述句，那是错的。',
+          '写完检查第一句：如果主语是「黄蓉」而不是「我」，就重写。',
+        ]
+      : []),
+  ].join('\n')
 }
 
 interface Memory {
@@ -77,7 +103,9 @@ function loadCast(playthroughId: string): CastRow[] {
 
 function loadMessages(playthroughId: string): MessageRow[] {
   return db
-    .prepare('SELECT * FROM messages WHERE playthrough_id = ? ORDER BY created_at')
+    .prepare(
+      'SELECT * FROM messages WHERE playthrough_id = ? AND replaced_by IS NULL ORDER BY created_at',
+    )
     .all(playthroughId) as unknown as MessageRow[]
 }
 
@@ -195,6 +223,11 @@ playthroughRoutes.get('/:id', (c) => {
     modelOverride: row.model_override ?? '',
     reasoningEffort: row.reasoning_effort ?? '',
     jailbreak: row.jailbreak ?? '',
+    prefill: row.prefill ?? '',
+    deliveryCheck: row.delivery_check ?? '',
+    stateRules: row.state_rules ?? '',
+    writingStyle: row.writing_style ?? '',
+    autoPrefill: extractPrefill(normalizePreset(JSON.parse(row.preset_json))),
     cast: loadCast(id).map((m) => ({
       id: m.id,
       name: m.name,
@@ -277,21 +310,24 @@ playthroughRoutes.post('/:id/beats', async (c) => {
     parentId = target.parent_id
   }
 
+  // 回退后重演时，这一拍原来的后续要被替换掉（不是留成第二条枝）。
+  // 重写这一拍（replaceLast）不算：那是同一拍的多个候选，要并存。
+  const oldDescendants =
+    !replaceLast && parentId
+      ? collectDescendants(
+          allMessages.map((m) => ({ ...m, parentId: m.parent_id })),
+          parentId,
+        )
+      : []
+
   const preset = normalizePreset(JSON.parse(row.preset_json))
   const lorebook = row.lorebook_json ? parseLorebook(JSON.parse(row.lorebook_json)) : undefined
   const presentNames = cast.map((m) => m.name)
 
-  // 新的导演指令先落库，并成为这一拍的父节点。
-  // 早先用的是插入前的旧 parent，导致导演消息和正文成了两个根。
-  let insertParentId = parentId
-  if (directive && !replaceLast) {
-    const directorId = randomUUID()
-    db.prepare(
-      `INSERT INTO messages (id, playthrough_id, parent_id, kind, content, meta_json, created_at)
-       VALUES (?, ?, ?, 'director', ?, NULL, ?)`,
-    ).run(directorId, id, parentId, directive, Date.now())
-    insertParentId = directorId
-  }
+  // 导演指令先占好 id 当父节点，但**等演出成功才落库**：
+  // 否则模型拒答或报错时，会留下一条没有正文的孤儿指令。
+  const directorId = directive && !replaceLast ? randomUUID() : null
+  const insertParentId = directorId ?? parentId
 
   // 前情提要：被摘要覆盖过的那段不再进「最近对话」
   let memoryRow = row
@@ -335,6 +371,39 @@ playthroughRoutes.post('/:id/beats', async (c) => {
 
   const scanText = [...recent.map((m) => m.content), directive, rewrite].join('\n')
 
+  // 这一拍对应的导演指令：重写时是 target 的父节点，
+  // 普通演出时是刚插入的那条。混在 chatHistory 里模型会当成「过去的记录」，
+  // 所以单独拎出来放进 system 当硬要求。
+  let thisBeatDirective = ''
+  if (replaceLast && target) {
+    const parent = currentPath.find((m) => m.id === target!.parent_id)
+    if (parent?.kind === 'director') thisBeatDirective = parent.content
+  } else if (directive) {
+    thisBeatDirective = directive
+  }
+
+  // 上一拍结束时的状态：模型必须拿它当基准，否则每拍都在重新编数字
+  let prevCharacters: Record<string, Record<string, string>> = {}
+  for (const m of [...history].reverse()) {
+    if (m.kind !== 'narration' || !m.meta_json) continue
+    try {
+      const meta = JSON.parse(m.meta_json) as { state?: { characters?: Record<string, Record<string, string>> } }
+      if (meta.state?.characters && Object.keys(meta.state.characters).length > 0) {
+        prevCharacters = meta.state.characters
+        break
+      }
+    } catch {
+      // 这一拍没有可用的状态，继续往前找
+    }
+  }
+
+  // 续写引导只用手填的。
+  // 预设里自动提取的那些（OK，/ [Understood.]）只对支持 prefill 的端点有用，
+  // 而 DeepSeek 这类端点会直接回 400「ending with a model turn」，
+  // 所以默认不发，免得每次白跑一轮。
+  const autoPrefill = extractPrefill(preset)
+  const effectivePrefill = (row.prefill ?? '').trim() || autoPrefill
+
   const assembly = assemble({
     actors: cast.map((m) => ({ name: m.name, body: JSON.parse(m.body_json) as CardBody })),
     presentNames,
@@ -374,6 +443,14 @@ playthroughRoutes.post('/:id/beats', async (c) => {
           )
         }
 
+        // 交付检查：对局可整段覆盖，否则用内置文案
+        const deliveryCheck =
+          (row.delivery_check ?? '').trim() ||
+          defaultDeliveryCheck(
+            templateLines.length > 0,
+            /第一人称/.test(row.extra_rules ?? ''),
+          )
+
         const messages = [
           ...(patch
             ? [
@@ -403,7 +480,33 @@ playthroughRoutes.post('/:id/beats', async (c) => {
                           ...templateLines,
                           '格式：{"characters": {"角色名": {"字段名": "值"}}}',
                           '只写模板里列出的角色与字段，多写一个都算错；不在名单里的角色不要出现。',
-                          '值要短（15 字以内），写这一拍结束时的状态。',
+                          '名单里的角色即使不在场也必须给值（写「不在场」或不写具体动作），不要省略。',
+                          '括号里的文字是填写要求，必须照它来填。',
+                          ...(Object.keys(prevCharacters).length > 0
+                            ? [
+                                '【上一拍结束时的数值（必须以此为基准，不要重新编）】',
+                                ...Object.entries(prevCharacters).map(
+                                  ([name, fields]) =>
+                                    `- ${name}：${Object.entries(fields)
+                                      .map(([k, v]) => `${k}=${v}`)
+                                      .join('、')}`,
+                                ),
+                                ...(row.state_rules
+                                  ? row.state_rules.split('\n').filter((l) => l.trim())
+                                  : [
+                                      '不在场的角色，所有数值必须与上一拍完全相同，一个字都不能变。',
+                                      '在场的角色，数值每拍最多变化 5（除非发生了实质性的重大事件）。',
+                                      '数值只能小幅波动，不要跳变。',
+                                      '但也不许连续三拍给同一个数字：剧情在推进，数值就该有反应。',
+                                      '每个字段要有自己的方向：被冒犯时好感度下降，被触动时上升；',
+                                      '发情指数随接触升温、随冷静回落；被攻略度只能靠实质进展提升。',
+                                    ]),
+                                '',
+                              ]
+                            : []),
+                          '如果字段名或要求里出现「数值」「值」「指数」「度」「分数」这类字眼，',
+                          '就只写一个阿拉伯数字（例如 35），不要写形容词、不要加括号注释、不要写「极高」这种词。',
+                          '只有明确是描述性字段（如身体状态、心情）才写短句，15 字以内。',
                           '',
                         ]
                       : []),
@@ -424,28 +527,55 @@ playthroughRoutes.post('/:id/beats', async (c) => {
                           '',
                         ]
                       : []),
+                    ...(row.writing_style
+                      ? ['【写作风格（整篇统一）】', row.writing_style, '']
+                      : []),
+                    ...(thisBeatDirective
+                      ? [
+                          '【这一拍必须写的事（导演要求，不得改写）】',
+                          thisBeatDirective,
+                          '这一拍就写这件事。不要切到别的地点、别的人物，也不要跳过它先写前因。',
+                          '',
+                        ]
+                      : []),
                     patch.content,
                     rewrite ? `\n【本次重写要求（优先满足）】\n${rewrite}` : '',
+                    '',
+                    // 放在最末尾：模型对最后的指令最敏感。对局可以整段覆盖。
+                    deliveryCheck,
                   ].join('\n'),
                 },
               ]
             : []),
           {
             role: 'user' as const,
-            content: material.map((s) => `### ${s.label}\n${s.content}`).join('\n\n'),
+            content:
+              material.map((s) => `### ${s.label}\n${s.content}`).join('\n\n') +
+              (effectivePrefill
+                ? `\n\n【你已经开始这样写了】\n${effectivePrefill}\n（接着这句往下续写，不要重复它，也不要重新开头。）`
+                : '') +
+              (/第一人称/.test(row.extra_rules ?? '')
+                ? '\n\n【最后提醒】本局用第一人称，叙述者只能是「我」。'
+                : '') +
+              (row.writing_style
+                ? `\n\n【文风要求（这一拍必须照此写）】\n${row.writing_style}`
+                : ''),
           },
         ]
 
+        const baseRequest = {
+          apiBase: provider.apiBase,
+          apiKey: provider.apiKey,
+          model: provider.model,
+          temperature: preset.params.temperature,
+          maxTokens: Math.max(4000, Math.min(preset.params.maxTokens, 8000)),
+          reasoningEffort: (row.reasoning_effort as ReasoningEffort) || undefined,
+        }
+
+        // 续写引导已经拼进 user 消息末尾了，所以这里始终保持 system + user 两条，
+        // 不会以 assistant 结尾——DeepSeek 这类端点会直接回 400。
         const result = await chatCompletionStream(
-          {
-            apiBase: provider.apiBase,
-            apiKey: provider.apiKey,
-            model: provider.model,
-            messages,
-            temperature: preset.params.temperature,
-            maxTokens: Math.max(2000, Math.min(preset.params.maxTokens, 6000)),
-            reasoningEffort: (row.reasoning_effort as ReasoningEffort) || undefined,
-          },
+          { ...baseRequest, messages },
           (delta) => send({ type: 'delta', text: delta }),
         )
 
@@ -453,6 +583,19 @@ playthroughRoutes.post('/:id/beats', async (c) => {
         const now = Date.now()
         // 三段拆开：正文入库，状态与岔路进 meta，解析警告也留着
         const parsed = parseBeat(result.content)
+
+        // 空内容不是正文：直接报错，不落库、不推进位置
+        if (!parsed.narration.trim()) {
+          send({
+            type: 'error',
+            error:
+              `模型返回了空内容（finish_reason = ${result.finishReason ?? '未知'}，` +
+              `completion tokens = ${result.usage?.completion ?? 0}）。` +
+              '多半是额度全花在思考上、或模型直接截断了。调大 max_tokens 或换个模型再试。',
+          })
+          controller.close()
+          return
+        }
 
         // 模型拒答不是正文：直接报错，不落库、不推进位置
         const refusal = detectRefusal(parsed.narration)
@@ -494,14 +637,35 @@ playthroughRoutes.post('/:id/beats', async (c) => {
           reasoningEffort: row.reasoning_effort ?? '',
           jailbreak: row.jailbreak ?? '',
           state: parsed.state ?? null,
+          stateRaw: parsed.state ? undefined : parsed.stateRaw,
           forks: parsed.forks ?? null,
           prompt: assembly.prompt,
+          // 实际发给模型的消息：system（破甲词/格式/补丁）+ user（素材）。
+          // 破甲词在 system 里，光看 assembly.prompt 是看不到的。
+          sentMessages: messages,
+          rawHead: result.content.slice(0, 120),
         })
+
+        if (directorId) {
+          // 必须用同一个 now：导演指令的时间要早于它引发的正文，
+          // 否则按 created_at 排序时正文会排到指令前面。
+          db.prepare(
+            `INSERT INTO messages (id, playthrough_id, parent_id, kind, content, meta_json, created_at)
+             VALUES (?, ?, ?, 'director', ?, NULL, ?)`,
+          ).run(directorId, id, parentId, directive, now)
+        }
 
         db.prepare(
           `INSERT INTO messages (id, playthrough_id, parent_id, kind, content, meta_json, created_at)
            VALUES (?, ?, ?, 'narration', ?, ?, ?)`,
         ).run(messageId, id, insertParentId, parsed.narration, metaJson, now)
+
+        // 新的这一拍已经落库，再把旧的后续删掉：用新步骤代替旧步骤
+        if (oldDescendants.length > 0) {
+          // 软删除：只标记「被哪一条替换了」，内容原样留着，随时能翻出来
+          const mark = db.prepare('UPDATE messages SET replaced_by = ? WHERE id = ?')
+          for (const stale of oldDescendants) mark.run(messageId, stale.id)
+        }
 
         db.prepare('UPDATE playthroughs SET current_leaf_id = ?, updated_at = ? WHERE id = ?').run(
           messageId,
@@ -561,7 +725,21 @@ async function compactInternal(
     throw new LlmError(`至少要有 ${keepRecent + 2} 拍才值得压缩，现在只有 ${narrations.length} 拍。`)
   }
 
-  const toCompress = narrations.slice(0, narrations.length - keepRecent)
+  // 增量压缩：如果已经有摘要，只压它覆盖之后、到保留线之前的那几拍，
+  // 否则会把最早那批重新压一遍，旧摘要里的细节就丢了。
+  const existing = row.memory_json ? (JSON.parse(row.memory_json) as Memory) : null
+
+  let toCompress = narrations.slice(0, narrations.length - keepRecent)
+  if (existing?.coveredUntil) {
+    const cutoff = narrations.findIndex((m) => m.id === existing.coveredUntil)
+    if (cutoff >= 0) toCompress = narrations.slice(cutoff + 1, narrations.length - keepRecent)
+  }
+
+  if (toCompress.length === 0) {
+    throw new LlmError('没有新的内容需要压缩。')
+  }
+
+  const freshText = toCompress.map((m) => m.content).join('\n\n')
 
   const result = await chatCompletion({
     apiBase: provider.apiBase,
@@ -571,18 +749,26 @@ async function compactInternal(
       {
         role: 'system',
         content: [
-          '把下面这段小说剧情压缩成「前情提要」。',
+          existing?.summary
+            ? '把「已有前情提要」和「新增剧情」合并成一份新的前情提要。'
+            : '把下面这段小说剧情压缩成「前情提要」。',
           '要求：200–300 字；保留人物、地点、已经做出的承诺与决定、尚未解决的隐患与误会；',
           '不要分点、不要评价、不要续写、不要写“本段讲述了”这类废话，直接叙述。',
+          ...(existing?.summary
+            ? ['合并时不要丢掉旧提要里仍然有效的线索，也不要重复叙述。']
+            : []),
         ].join('\n'),
       },
       {
         role: 'user',
-        content: toCompress.map((m) => m.content).join('\n\n'),
+        content: existing?.summary
+          ? `【已有前情提要】\n${existing.summary}\n\n【新增剧情】\n${freshText}`
+          : freshText,
       },
     ],
     temperature: 0.3,
-    maxTokens: 1000,
+    // 推理型模型会先花一大笔额度在思考上，摘要本身只要 300 字
+    maxTokens: 8000,
   })
 
   const memory: Memory = {
@@ -859,6 +1045,90 @@ playthroughRoutes.put('/:id/jailbreak', async (c) => {
   return c.json({ jailbreak: text })
 })
 
+/** 写作风格提示词：整篇统一的文风要求。 */
+playthroughRoutes.put('/:id/style', async (c) => {
+  const id = c.req.param('id')
+  const row = db
+    .prepare('SELECT id FROM playthroughs WHERE id = ?')
+    .get(id) as unknown as { id: string } | undefined
+
+  if (!row) return c.json({ error: '对局不存在' }, 404)
+
+  const body = (await c.req.json().catch(() => ({}))) as { writingStyle?: unknown }
+  const text = typeof body.writingStyle === 'string' ? body.writingStyle : ''
+
+  db.prepare('UPDATE playthroughs SET writing_style = ?, updated_at = ? WHERE id = ?').run(
+    text.trim() || null,
+    Date.now(),
+    id,
+  )
+
+  return c.json({ writingStyle: text.trim() })
+})
+
+/** 状态累积规则：数值怎么变，可整段覆盖。 */
+playthroughRoutes.put('/:id/state-rules', async (c) => {
+  const id = c.req.param('id')
+  const row = db
+    .prepare('SELECT id FROM playthroughs WHERE id = ?')
+    .get(id) as unknown as { id: string } | undefined
+
+  if (!row) return c.json({ error: '对局不存在' }, 404)
+
+  const body = (await c.req.json().catch(() => ({}))) as { stateRules?: unknown }
+  const text = typeof body.stateRules === 'string' ? body.stateRules : ''
+
+  db.prepare('UPDATE playthroughs SET state_rules = ?, updated_at = ? WHERE id = ?').run(
+    text.trim() || null,
+    Date.now(),
+    id,
+  )
+
+  return c.json({ stateRules: text.trim() })
+})
+
+/** 交付检查：追加在 system 最末的那段要求，可整段覆盖。 */
+playthroughRoutes.put('/:id/delivery', async (c) => {
+  const id = c.req.param('id')
+  const row = db
+    .prepare('SELECT id FROM playthroughs WHERE id = ?')
+    .get(id) as unknown as { id: string } | undefined
+
+  if (!row) return c.json({ error: '对局不存在' }, 404)
+
+  const body = (await c.req.json().catch(() => ({}))) as { deliveryCheck?: unknown }
+  const text = typeof body.deliveryCheck === 'string' ? body.deliveryCheck : ''
+
+  db.prepare('UPDATE playthroughs SET delivery_check = ?, updated_at = ? WHERE id = ?').run(
+    text.trim() || null,
+    Date.now(),
+    id,
+  )
+
+  return c.json({ deliveryCheck: text.trim() })
+})
+
+/** 助手预填：模型会接着这句话继续写，而不是从零开始。 */
+playthroughRoutes.put('/:id/prefill', async (c) => {
+  const id = c.req.param('id')
+  const row = db
+    .prepare('SELECT id FROM playthroughs WHERE id = ?')
+    .get(id) as unknown as { id: string } | undefined
+
+  if (!row) return c.json({ error: '对局不存在' }, 404)
+
+  const body = (await c.req.json().catch(() => ({}))) as { prefill?: unknown }
+  const text = typeof body.prefill === 'string' ? body.prefill : ''
+
+  db.prepare('UPDATE playthroughs SET prefill = ?, updated_at = ? WHERE id = ?').run(
+    text || null,
+    Date.now(),
+    id,
+  )
+
+  return c.json({ prefill: text })
+})
+
 /** 给这一局单独指定供应商与模型；清空则跟随全局设置。 */
 playthroughRoutes.put('/:id/model', async (c) => {
   const id = c.req.param('id')
@@ -921,7 +1191,10 @@ playthroughRoutes.get('/:id/export', (c) => {
   if (!row) return c.json({ error: '对局不存在' }, 404)
 
   const cast = loadCast(id)
-  const messages = loadMessages(id)
+  // 导出带上被替换掉的旧内容（软删除的），否则备份不完整
+  const messages = db
+    .prepare('SELECT * FROM messages WHERE playthrough_id = ? ORDER BY created_at')
+    .all(id) as unknown as MessageRow[]
 
   const bundle = {
     format: 'huaben-playthrough',

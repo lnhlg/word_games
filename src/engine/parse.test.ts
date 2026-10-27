@@ -110,3 +110,31 @@ test('长正文里角色说「我不能」不会被误判成拒答', () => {
 test('正常正文不会被当成拒答', () => {
   assert.equal(detectRefusal('黄蓉立在书房门外，手已经抬到一半，却又停住了。'), null)
 })
+
+test('状态段套了 markdown 代码块也能解析', () => {
+  const raw = '【正文】\n正文\n\n【状态】\n```json\n{"scene":{"location":"书房","time":"夜"}}\n```'
+  const beat = parseBeat(raw)
+  assert.equal(beat.state?.scene.location, '书房')
+  assert.equal(beat.warnings.length, 0)
+})
+
+test('状态段有尾随逗号也能救回来', () => {
+  const raw = '【正文】\n正文\n\n【状态】\n{"scene":{"location":"书房",},"present":["黄蓉",],}'
+  const beat = parseBeat(raw)
+  assert.equal(beat.state?.scene.location, '书房')
+  assert.deepEqual(beat.state?.present, ['黄蓉'])
+  assert.ok(beat.warnings.some((w) => w.includes('自动修复')))
+})
+
+test('状态段前后夹带说明文字也能取出 JSON', () => {
+  const raw = '【正文】\n正文\n\n【状态】\n好的，这是状态：{"scene":{"location":"城头"}} 希望有帮助。'
+  const beat = parseBeat(raw)
+  assert.equal(beat.state?.scene.location, '城头')
+})
+
+test('彻底不是 JSON 时仍然降级并警告', () => {
+  const raw = '【正文】\n正文\n\n【状态】\n这里没有任何结构化数据'
+  const beat = parseBeat(raw)
+  assert.equal(beat.state, undefined)
+  assert.ok(beat.warnings.some((w) => w.includes('不是合法 JSON')))
+})

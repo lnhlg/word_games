@@ -1169,6 +1169,16 @@ label.inline input {
   font-family: ui-monospace, Consolas, monospace;
 }
 
+.sent-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sent-msg {
+  margin: 0;
+}
+
 .play-meta {
   padding: 6px 0 0;
   border-top: 1px solid var(--line);

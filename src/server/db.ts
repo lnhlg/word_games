@@ -87,6 +87,12 @@ db.exec(`
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_playthrough ON messages(playthrough_id, created_at)`)
 
+// 软删除：回退重演时旧内容只标记、不删除
+const messageColumns = db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+if (!messageColumns.some((c) => c.name === 'replaced_by')) {
+  db.exec('ALTER TABLE messages ADD COLUMN replaced_by TEXT')
+}
+
 // 老库兼容：记忆压缩是后来加的
 const playthroughColumns = db.prepare('PRAGMA table_info(playthroughs)').all() as Array<{
   name: string
@@ -118,6 +124,19 @@ if (!playthroughColumns.some((c) => c.name === 'reasoning_effort')) {
 if (!playthroughColumns.some((c) => c.name === 'jailbreak')) {
   db.exec('ALTER TABLE playthroughs ADD COLUMN jailbreak TEXT')
 }
+if (!playthroughColumns.some((c) => c.name === 'prefill')) {
+  db.exec('ALTER TABLE playthroughs ADD COLUMN prefill TEXT')
+}
+if (!playthroughColumns.some((c) => c.name === 'delivery_check')) {
+  db.exec('ALTER TABLE playthroughs ADD COLUMN delivery_check TEXT')
+}
+if (!playthroughColumns.some((c) => c.name === 'state_rules')) {
+  db.exec('ALTER TABLE playthroughs ADD COLUMN state_rules TEXT')
+}
+if (!playthroughColumns.some((c) => c.name === 'writing_style')) {
+  db.exec('ALTER TABLE playthroughs ADD COLUMN writing_style TEXT')
+}
+// 软删除：被替换掉的旧内容不真删，只标记
 
 /**
  * 把 WAL 合并回主库。

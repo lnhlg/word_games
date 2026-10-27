@@ -78,3 +78,31 @@ export function forkCounts<T extends TreeMessage>(messages: T[]): Map<string, nu
   }
   return counts
 }
+
+/**
+ * 某个节点的全部后代（不含自己）。
+ * 回退后重新生成时，用它找出要被替换掉的旧后续。
+ */
+export function collectDescendants<T extends TreeMessage>(messages: T[], rootId: string): T[] {
+  const childrenOf = new Map<string, T[]>()
+  for (const message of messages) {
+    if (!message.parentId) continue
+    const list = childrenOf.get(message.parentId) ?? []
+    list.push(message)
+    childrenOf.set(message.parentId, list)
+  }
+
+  const out: T[] = []
+  const seen = new Set<string>()
+  const stack = [...(childrenOf.get(rootId) ?? [])]
+
+  while (stack.length > 0) {
+    const node = stack.pop()!
+    if (seen.has(node.id)) continue
+    seen.add(node.id)
+    out.push(node)
+    stack.push(...(childrenOf.get(node.id) ?? []))
+  }
+
+  return out
+}
