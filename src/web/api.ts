@@ -3,6 +3,7 @@ import type {
   CardDraft,
   CardImportResult,
   CastTemplates,
+  GameState,
   CreateMaterialInput,
   Lorebook,
   Material,
@@ -380,6 +381,17 @@ export function updatePrefill(id: string, prefill: string): Promise<{ prefill: s
   return request(`/api/playthroughs/${id}/prefill`, {
     method: 'PUT',
     body: JSON.stringify({ prefill }),
+  })
+}
+
+/** 只重算这一拍的状态栏，正文不动。 */
+export function regenerateState(
+  id: string,
+  messageId: string,
+): Promise<{ state: GameState }> {
+  return request(`/api/playthroughs/${id}/messages/${messageId}/state`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(180_000),
   })
 }
 

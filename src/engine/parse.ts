@@ -6,7 +6,7 @@ function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-function normalizeState(raw: unknown): GameState {
+export function normalizeState(raw: unknown): GameState {
   const source = (raw ?? {}) as Record<string, unknown>
   const scene = (source.scene ?? {}) as Record<string, unknown>
 
@@ -81,7 +81,7 @@ function parseForks(text: string): Fork[] {
  * 模型常见的毛病：套一层 ```json 代码块、尾随逗号、前后夹带解释文字、
  * 用中文引号。这些都能救回来，不该直接判定「状态未记录」。
  */
-function parseStateJson(raw: string): { value: unknown; repaired: boolean } | null {
+export function parseStateJson(raw: string): { value: unknown; repaired: boolean } | null {
   let candidate = raw.trim()
 
   // 去掉 markdown 代码块包裹
@@ -97,6 +97,45 @@ function parseStateJson(raw: string): { value: unknown; repaired: boolean } | nu
     return { value: JSON.parse(candidate), repaired: false }
   } catch {
     // 继续尝试修复
+  }
+
+  // Gemini 有时把 scene 和 characters 拆成两个 JSON 块，逐块解析再合并。
+  // 用括号计数切分，正则遇到嵌套对象会切错。
+  const blocks: string[] = []
+  let depth = 0
+  let blockStart = -1
+  for (let i = 0; i < candidate.length; i++) {
+    const ch = candidate[i]
+    if (ch === '{') {
+      if (depth === 0) blockStart = i
+      depth++
+    } else if (ch === '}') {
+      depth--
+      if (depth === 0 && blockStart >= 0) {
+        blocks.push(candidate.slice(blockStart, i + 1))
+        blockStart = -1
+      }
+    }
+  }
+  if (blocks.length > 1) {
+    const merged: Record<string, unknown> = {}
+    let ok = true
+    for (const block of blocks) {
+      try {
+        const one = JSON.parse(block) as Record<string, unknown>
+        for (const [k, v] of Object.entries(one)) {
+          if (k === 'characters' && merged.characters && typeof v === 'object') {
+            merged.characters = { ...(merged.characters as object), ...(v as object) }
+          } else {
+            merged[k] = v
+          }
+        }
+      } catch {
+        ok = false
+        break
+      }
+    }
+    if (ok) return { value: merged, repaired: true }
   }
 
   const attempts = [

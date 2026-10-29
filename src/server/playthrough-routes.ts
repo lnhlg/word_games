@@ -6,7 +6,13 @@ import type { LlmProvider } from './settings.ts'
 import { chatCompletion, chatCompletionStream, LlmError } from './llm.ts'
 import type { ReasoningEffort } from './llm.ts'
 import { assemble, DEFAULT_BUDGET_CHARS, type HistoryMessage } from '../engine/assembly.ts'
-import { detectRefusal, parseBeat, parseForksFromText } from '../engine/parse.ts'
+import {
+  detectRefusal,
+  normalizeState,
+  parseBeat,
+  parseForksFromText,
+  parseStateJson,
+} from '../engine/parse.ts'
 import { buildPath, collectDescendants } from '../engine/tree.ts'
 import { extractPrefill, normalizePreset } from '../tavern/preset.ts'
 import { parseLorebook } from '../tavern/lorebook.ts'
@@ -497,10 +503,11 @@ playthroughRoutes.post('/:id/beats', async (c) => {
                                       '不在场的角色，所有数值必须与上一拍完全相同，一个字都不能变。',
                                       '在场的角色，数值每拍最多变化 5（除非发生了实质性的重大事件）。',
                                       '数值只能小幅波动，不要跳变。',
-                                      '但也不许连续三拍给同一个数字：剧情在推进，数值就该有反应。',
-                                      '每个字段要有自己的方向：被冒犯时好感度下降，被触动时上升；',
-                                      '发情指数随接触升温、随冷静回落；被攻略度只能靠实质进展提升。',
                                     ]),
+                                // 下面两条不可关闭：自定义规则里写「最多变 2」时，
+                                // 模型会理解成「最好别变」，数值就卡住了。
+                                '在场的角色，每拍至少有 1 个字段要变。',
+                                '不许连续三拍给同一个数字：剧情在推进，数值就该有反应。',
                                 '',
                               ]
                             : []),
@@ -561,6 +568,11 @@ playthroughRoutes.post('/:id/beats', async (c) => {
                 ? `\n\n【文风要求（这一拍必须照此写）】\n${row.writing_style}`
                 : ''),
           },
+          // 续写引导：Gemini 这类端点会接着这句写（酒馆就是靠这个破限）。
+          // Ollama / DeepSeek 会回 400「ending with a model turn」，下面会降级重试。
+          ...(effectivePrefill
+            ? [{ role: 'assistant' as const, content: effectivePrefill }]
+            : []),
         ]
 
         const baseRequest = {
@@ -572,17 +584,49 @@ playthroughRoutes.post('/:id/beats', async (c) => {
           reasoningEffort: (row.reasoning_effort as ReasoningEffort) || undefined,
         }
 
-        // 续写引导已经拼进 user 消息末尾了，所以这里始终保持 system + user 两条，
-        // 不会以 assistant 结尾——DeepSeek 这类端点会直接回 400。
-        const result = await chatCompletionStream(
-          { ...baseRequest, messages },
-          (delta) => send({ type: 'delta', text: delta }),
-        )
+        const wantsPrefill = messages.some((m) => m.role === 'assistant')
+        const withoutPrefill = messages.filter((m) => m.role !== 'assistant')
+
+        let result
+        try {
+          result = await chatCompletionStream(
+            { ...baseRequest, messages },
+            (delta) => send({ type: 'delta', text: delta }),
+          )
+        } catch (error) {
+          const text = error instanceof Error ? error.message : String(error)
+          // Ollama / 部分中转不支持以 assistant 结尾，去掉重试一次
+          if (wantsPrefill && /ending with a model turn|model turn are not supported/i.test(text)) {
+            autoWarnings.push('这个模型不支持续写引导（结尾不能是助手消息），本次已跳过。')
+            result = await chatCompletionStream(
+              { ...baseRequest, messages: withoutPrefill },
+              (delta) => send({ type: 'delta', text: delta }),
+            )
+          } else {
+            throw error
+          }
+        }
 
         const messageId = randomUUID()
         const now = Date.now()
         // 三段拆开：正文入库，状态与岔路进 meta，解析警告也留着
         const parsed = parseBeat(result.content)
+
+        // Gemini 遇到 assistant prefill 时会「重新生成整段」，开头照抄上一拍。
+        // 去掉与上一拍重复的前缀，否则同一段话会连着出现两遍。
+        const prevNarration = [...history]
+          .reverse()
+          .find((m) => m.kind === 'narration')?.content
+        if (prevNarration) {
+          const a = prevNarration.trim()
+          const b = parsed.narration.trim()
+          let common = 0
+          while (common < a.length && common < b.length && a[common] === b[common]) common++
+          if (common >= 20) {
+            parsed.narration = b.slice(common).trimStart()
+            parsed.warnings.push(`去掉了与上一拍重复的 ${common} 字开头。`)
+          }
+        }
 
         // 空内容不是正文：直接报错，不落库、不推进位置
         if (!parsed.narration.trim()) {
@@ -1022,6 +1066,139 @@ playthroughRoutes.patch('/:id/messages/:messageId', async (c) => {
   db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, messageId)
 
   return c.json({ ok: true, content })
+})
+
+/** 只重算这一拍的状态栏，正文一个字不动。 */
+playthroughRoutes.post('/:id/messages/:messageId/state', async (c) => {
+  const id = c.req.param('id')
+  const messageId = c.req.param('messageId')
+
+  const play = db
+    .prepare('SELECT * FROM playthroughs WHERE id = ?')
+    .get(id) as unknown as PlaythroughRow | undefined
+  if (!play) return c.json({ error: '对局不存在' }, 404)
+
+  const msg = db
+    .prepare('SELECT * FROM messages WHERE id = ? AND playthrough_id = ?')
+    .get(messageId, id) as unknown as MessageRow | undefined
+  if (!msg) return c.json({ error: '这一拍不属于当前对局。' }, 404)
+  if (msg.kind !== 'narration') return c.json({ error: '只有正文能算状态。' }, 400)
+
+  const provider = providerFor(play)
+  if (!provider?.apiKey || !provider.model) {
+    return c.json({ error: '还没有可用的模型。' }, 400)
+  }
+
+  const templates = JSON.parse(play.cast_templates_json || '{}') as Record<
+    string,
+    Array<{ key: string; hint?: string }>
+  >
+  const cast = loadCast(id)
+
+  const templateLines = cast
+    .filter((m) => (templates[m.name] ?? []).length > 0)
+    .map((m) => {
+      const fields = templates[m.name]
+        .map((f) => (f.hint ? `${f.key}（${f.hint}）` : f.key))
+        .join('、')
+      return `- ${m.name}：${fields}`
+    })
+
+  if (templateLines.length === 0) {
+    return c.json({ error: '这一局还没有角色状态模板。' }, 400)
+  }
+
+  // 上一拍的数值作基准
+  const all = loadMessages(id)
+  const mine = all.find((m) => m.id === messageId)
+  let prevCharacters: Record<string, Record<string, string>> = {}
+  if (mine) {
+    for (const m of [...all].reverse()) {
+      if (m.created_at >= mine.created_at) continue
+      if (m.kind !== 'narration' || !m.meta_json) continue
+      try {
+        const meta = JSON.parse(m.meta_json) as {
+          state?: { characters?: Record<string, Record<string, string>> }
+        }
+        if (meta.state?.characters && Object.keys(meta.state.characters).length > 0) {
+          prevCharacters = meta.state.characters
+          break
+        }
+      } catch {
+        // 跳过坏的
+      }
+    }
+  }
+
+  try {
+    const result = await chatCompletion({
+      apiBase: provider.apiBase,
+      apiKey: provider.apiKey,
+      model: provider.model,
+      messages: [
+        {
+          role: 'system',
+          content: '你在按模板记录小说角色状态。只输出一个 JSON 对象，不要解释、不要代码块。',
+        },
+        {
+          role: 'user',
+          content: [
+            '【这一拍的正文】',
+            msg.content,
+            '',
+            '【角色状态模板】',
+            ...templateLines,
+            '',
+            '【输出格式】',
+            '{"characters": {"角色名": {"字段名": "值"}}}',
+            '只写模板里列出的角色与字段，一个都不能少；名单里不在场的也要给值。',
+            '字段名或说明里出现「数值」「指数」「度」的，只写阿拉伯数字。',
+            '',
+            ...(Object.keys(prevCharacters).length > 0
+              ? [
+                  '【上一拍的数值（以此为基准）】',
+                  ...Object.entries(prevCharacters).map(
+                    ([name, fields]) =>
+                      `- ${name}：${Object.entries(fields)
+                        .map(([k, v]) => `${k}=${v}`)
+                        .join('、')}`,
+                  ),
+                  '',
+                ]
+              : []),
+          ].join('\n'),
+        },
+      ],
+      temperature: 0.3,
+      maxTokens: 2000,
+    })
+
+    const stateResult = parseStateJson(result.content)
+    if (!stateResult) {
+      return c.json({ error: '模型没有给出可解析的 JSON。' }, 400)
+    }
+
+    const meta = msg.meta_json ? (JSON.parse(msg.meta_json) as Record<string, unknown>) : {}
+    const state = normalizeState(stateResult.value)
+    meta.state = state
+    delete meta.stateRaw
+    // 状态已经重算过，之前那条「状态段不是合法 JSON」的警告就过期了
+    if (Array.isArray(meta.parseWarnings)) {
+      meta.parseWarnings = (meta.parseWarnings as string[]).filter(
+        (w) => !w.includes('状态'),
+      )
+    }
+
+    db.prepare('UPDATE messages SET meta_json = ? WHERE id = ?').run(
+      JSON.stringify(meta),
+      messageId,
+    )
+
+    return c.json({ state })
+  } catch (error) {
+    const message = error instanceof LlmError ? error.message : '重算状态失败'
+    return c.json({ error: message }, 400)
+  }
 })
 
 /** 破甲提示词：放在 system 消息最前，作为整段语境的底座。 */

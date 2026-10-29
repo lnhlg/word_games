@@ -12,6 +12,7 @@ import {
   updateDeliveryCheck,
   updateStateRules,
   updateWritingStyle,
+  regenerateState,
   updateMessageContent,
   updatePrefill,
   updatePlayModel,
@@ -138,6 +139,7 @@ export default function PlayView({ playthroughId, onBack }: Props) {
   })
   const [editingId, setEditingId] = useState<string | null>(null)
   const [skipReplaceConfirm, setSkipReplaceConfirm] = useState(false)
+  const [recomputingId, setRecomputingId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
   const [providers, setProviders] = useState<PublicProvider[]>([])
@@ -346,6 +348,20 @@ export default function PlayView({ playthroughId, onBack }: Props) {
       await play()
     } finally {
       setSkipReplaceConfirm(false)
+    }
+  }
+
+  /** 只重算这一拍的状态栏，正文不动。 */
+  async function recomputeState(messageId: string) {
+    setRecomputingId(messageId)
+    setError(null)
+    try {
+      await regenerateState(playthroughId, messageId)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '重算状态失败')
+    } finally {
+      setRecomputingId(null)
     }
   }
 
@@ -579,7 +595,16 @@ export default function PlayView({ playthroughId, onBack }: Props) {
 
         {beatState && Object.keys(beatState.characters ?? {}).length > 0 ? (
           <div className="beat-block">
-            <p className="beat-label">角色状态</p>
+            <p className="beat-label">
+              角色状态
+              <button
+                className="link small"
+                onClick={() => void recomputeState(message.id)}
+                disabled={recomputingId === message.id}
+              >
+                {recomputingId === message.id ? '重算中…' : '重算'}
+              </button>
+            </p>
             <div className="beat-characters">
               {Object.entries(beatState.characters).map(([name, fields]) => (
                 <p key={name}>
@@ -592,7 +617,18 @@ export default function PlayView({ playthroughId, onBack }: Props) {
             </div>
           </div>
         ) : (
-          beatState && <p className="beat-scene muted">这一拍没有角色状态</p>
+          (beatState || message.kind === 'narration') && (
+            <p className="beat-scene muted">
+              这一拍没有角色状态
+              <button
+                className="link small"
+                onClick={() => void recomputeState(message.id)}
+                disabled={recomputingId === message.id}
+              >
+                {recomputingId === message.id ? '重算中…' : '重算'}
+              </button>
+            </p>
+          )
         )}
       </>
     )

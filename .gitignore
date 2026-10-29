@@ -42,3 +42,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# ── 本地密钥（绝不入库）──
+.ssh/
