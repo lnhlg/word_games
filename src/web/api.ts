@@ -384,6 +384,20 @@ export function updatePrefill(id: string, prefill: string): Promise<{ prefill: s
   })
 }
 
+/** 按更改请求改写选中的那段文字，返回结果但不落库。 */
+export function rewriteSelection(
+  id: string,
+  messageId: string,
+  selected: string,
+  instruction: string,
+): Promise<{ rewritten: string }> {
+  return request(`/api/playthroughs/${id}/messages/${messageId}/rewrite-selection`, {
+    method: 'POST',
+    body: JSON.stringify({ selected, instruction }),
+    signal: AbortSignal.timeout(180_000),
+  })
+}
+
 /** 只重算这一拍的状态栏，正文不动。 */
 export function regenerateState(
   id: string,

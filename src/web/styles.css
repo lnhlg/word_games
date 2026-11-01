@@ -1850,3 +1850,25 @@ label.inline input {
   border: 1px solid var(--line);
   border-radius: 6px;
 }
+
+/* 选中改写 */
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  background: var(--paper);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+
+.selection-bar input {
+  flex: 1;
+  min-width: 220px;
+}
+
+.beat-body {
+  cursor: text;
+}

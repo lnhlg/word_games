@@ -13,6 +13,7 @@ import {
   updateStateRules,
   updateWritingStyle,
   regenerateState,
+  rewriteSelection,
   updateMessageContent,
   updatePrefill,
   updatePlayModel,
@@ -140,6 +141,9 @@ export default function PlayView({ playthroughId, onBack }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [skipReplaceConfirm, setSkipReplaceConfirm] = useState(false)
   const [recomputingId, setRecomputingId] = useState<string | null>(null)
+  const [selection, setSelection] = useState<{ text: string; messageId: string } | null>(null)
+  const [rewriteDraft, setRewriteDraft] = useState('')
+  const [rewriting, setRewriting] = useState(false)
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
   const [providers, setProviders] = useState<PublicProvider[]>([])
@@ -348,6 +352,43 @@ export default function PlayView({ playthroughId, onBack }: Props) {
       await play()
     } finally {
       setSkipReplaceConfirm(false)
+    }
+  }
+
+  /** 选中正文里的一段，准备按指令改写它。 */
+  function captureSelection(messageId: string) {
+    const text = window.getSelection()?.toString().trim() ?? ''
+    setSelection(text.length >= 2 ? { text, messageId } : null)
+    setRewriteDraft('')
+  }
+
+  async function applyRewrite() {
+    if (!selection || !rewriteDraft.trim()) return
+    setRewriting(true)
+    setError(null)
+    try {
+      const { rewritten } = await rewriteSelection(
+        playthroughId,
+        selection.messageId,
+        selection.text,
+        rewriteDraft.trim(),
+      )
+
+      const target = messages.find((m) => m.id === selection.messageId)
+      if (!target) throw new Error('找不到这一拍')
+      if (!target.content.includes(selection.text)) {
+        throw new Error('原文里找不到选中的那段（可能已经改过了），请重新选择。')
+      }
+
+      const next = target.content.replace(selection.text, rewritten)
+      await updateMessageContent(playthroughId, selection.messageId, next)
+      setSelection(null)
+      setRewriteDraft('')
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '改写失败')
+    } finally {
+      setRewriting(false)
     }
   }
 
@@ -731,6 +772,7 @@ export default function PlayView({ playthroughId, onBack }: Props) {
             </p>
           ) : (
             <article key={message.id} className="beat">
+              <div className="beat-body" onMouseUp={() => captureSelection(message.id)}>
               {editingId === message.id ? (
                 <div className="beat-editor">
                   <textarea
@@ -753,6 +795,38 @@ export default function PlayView({ playthroughId, onBack }: Props) {
                 </div>
               ) : (
                 renderParagraphs(message.content)
+              )}
+              </div>
+
+              {selection?.messageId === message.id && (
+                <div className="selection-bar">
+                  <span className="muted small">已选 {selection.text.length} 字</span>
+                  <input
+                    value={rewriteDraft}
+                    onChange={(e) => setRewriteDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        void applyRewrite()
+                      }
+                    }}
+                    placeholder="要改成什么？例如：把这段改得更克制，去掉露骨的描写"
+                    autoFocus
+                  />
+                  <button className="primary small-btn" onClick={applyRewrite} disabled={rewriting}>
+                    {rewriting ? '改写中…' : '改写'}
+                  </button>
+                  <button
+                    className="ghost small-btn"
+                    onClick={() => {
+                      setSelection(null)
+                      setRewriteDraft('')
+                    }}
+                    disabled={rewriting}
+                  >
+                    取消
+                  </button>
+                </div>
               )}
 
               {/* 最新一拍完整展示；历史拍折叠，省纵向空间 */}

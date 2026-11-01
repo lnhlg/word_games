@@ -950,7 +950,8 @@ playthroughRoutes.post('/:id/forks/regenerate', async (c) => {
         { role: 'user', content: `当前这段正文：\n\n${target.content}` },
       ],
       temperature: 0.95,
-      maxTokens: 800,
+      // 三条岔路本身只要一百来字，但推理模型会先把额度花在思考上
+      maxTokens: 6000,
     })
 
     const forks = parseForksFromText(result.content)
@@ -1068,6 +1069,80 @@ playthroughRoutes.patch('/:id/messages/:messageId', async (c) => {
   return c.json({ ok: true, content })
 })
 
+/** 按用户的更改请求改写选中的那段文字，返回改写结果，不动正文。 */
+playthroughRoutes.post('/:id/messages/:messageId/rewrite-selection', async (c) => {
+  const id = c.req.param('id')
+  const messageId = c.req.param('messageId')
+
+  const play = db
+    .prepare('SELECT * FROM playthroughs WHERE id = ?')
+    .get(id) as unknown as PlaythroughRow | undefined
+  if (!play) return c.json({ error: '对局不存在' }, 404)
+
+  const msg = db
+    .prepare('SELECT * FROM messages WHERE id = ? AND playthrough_id = ?')
+    .get(messageId, id) as unknown as MessageRow | undefined
+  if (!msg) return c.json({ error: '这一拍不属于当前对局。' }, 404)
+
+  const provider = providerFor(play)
+  if (!provider?.apiKey || !provider.model) {
+    return c.json({ error: '还没有可用的模型。' }, 400)
+  }
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    selected?: unknown
+    instruction?: unknown
+  }
+  const selected = typeof body.selected === 'string' ? body.selected : ''
+  const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : ''
+
+  if (!selected.trim()) return c.json({ error: '没有选中任何文字。' }, 400)
+  if (!instruction) return c.json({ error: '请写出要改什么。' }, 400)
+
+  try {
+    const result = await chatCompletion({
+      apiBase: provider.apiBase,
+      apiKey: provider.apiKey,
+      model: provider.model,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            '你在帮一位作者改稿。',
+            '下面会给出「整段正文」和「要改的那一小段」，以及作者的更改要求。',
+            '只输出改写后的那一小段，不要输出整段，不要解释，不要加引号或标记。',
+            '保持与原文一致的人称、时态与文风；只改作者要求的地方，其余原样保留。',
+            '改完的长度应与原文相近，除非作者要求增删。',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: [
+            '【整段正文（仅供理解上下文，不要改写它）】',
+            msg.content,
+            '',
+            '【要改的这一小段】',
+            selected,
+            '',
+            '【更改要求】',
+            instruction,
+          ].join('\n'),
+        },
+      ],
+      temperature: play.model_override ? 0.8 : 0.7,
+      maxTokens: 4000,
+    })
+
+    const rewritten = result.content.trim()
+    if (!rewritten) return c.json({ error: '模型返回了空内容。' }, 400)
+
+    return c.json({ rewritten })
+  } catch (error) {
+    const message = error instanceof LlmError ? error.message : '改写失败'
+    return c.json({ error: message }, 400)
+  }
+})
+
 /** 只重算这一拍的状态栏，正文一个字不动。 */
 playthroughRoutes.post('/:id/messages/:messageId/state', async (c) => {
   const id = c.req.param('id')
@@ -1170,7 +1245,7 @@ playthroughRoutes.post('/:id/messages/:messageId/state', async (c) => {
         },
       ],
       temperature: 0.3,
-      maxTokens: 2000,
+      maxTokens: 4000,
     })
 
     const stateResult = parseStateJson(result.content)
