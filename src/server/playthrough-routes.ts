@@ -316,15 +316,15 @@ playthroughRoutes.post('/:id/beats', async (c) => {
     parentId = target.parent_id
   }
 
-  // 回退后重演时，这一拍原来的后续要被替换掉（不是留成第二条枝）。
-  // 重写这一拍（replaceLast）不算：那是同一拍的多个候选，要并存。
-  const oldDescendants =
-    !replaceLast && parentId
-      ? collectDescendants(
-          allMessages.map((m) => ({ ...m, parentId: m.parent_id })),
-          parentId,
-        )
-      : []
+  // 生成成功后，这一拍原来的内容要被替换掉（软删除），不保留第二版本。
+  // 重写这一拍时 parentId 就是 target 的父节点，所以 target 本身也在后代里，
+  // 会被一起标记成已替换。
+  const oldDescendants = parentId
+    ? collectDescendants(
+        allMessages.map((m) => ({ ...m, parentId: m.parent_id })),
+        parentId,
+      )
+    : []
 
   const preset = normalizePreset(JSON.parse(row.preset_json))
   const lorebook = row.lorebook_json ? parseLorebook(JSON.parse(row.lorebook_json)) : undefined
@@ -667,6 +667,28 @@ playthroughRoutes.post('/:id/beats', async (c) => {
             if (Object.keys(kept).length > 0) filtered[name] = kept
           }
           parsed.state.characters = filtered
+
+          // 数值跳变钳制：模型换了场景就会把好感度从 71 直接编成 4。
+          // 提示词管不住这件事，只能在落库前兜一道。
+          if (Object.keys(prevCharacters).length > 0) {
+            for (const [name, fields] of Object.entries(parsed.state.characters)) {
+              const prev = prevCharacters[name]
+              if (!prev) continue
+
+              for (const [key, value] of Object.entries(fields)) {
+                const current = Number(value.replace(/[^\d.-]/g, ''))
+                const before = Number(String(prev[key] ?? '').replace(/[^\d.-]/g, ''))
+                if (!Number.isFinite(current) || !Number.isFinite(before)) continue
+                if (Math.abs(current - before) <= 20) continue
+
+                const clamped = Math.max(0, Math.min(100, before + (current > before ? 5 : -5)))
+                fields[key] = String(Math.round(clamped))
+                parsed.warnings.push(
+                  `${name} 的「${key}」从 ${before} 跳到 ${current}，已钳制为 ${Math.round(clamped)}。`,
+                )
+              }
+            }
+          }
         }
 
         const metaJson = JSON.stringify({
@@ -929,6 +951,16 @@ playthroughRoutes.post('/:id/forks/regenerate', async (c) => {
 
   if (!target) return c.json({ error: '还没有正文，先演一拍。' }, 400)
 
+  // 岔路要接在「最后发生的事」上，所以正文末尾单独拎出来给模型
+  const tail = target.content.slice(-400)
+  const targetMeta = target.meta_json
+    ? (JSON.parse(target.meta_json) as { state?: { scene?: { location?: string; time?: string } } })
+    : {}
+  const sceneParts = [targetMeta.state?.scene?.location, targetMeta.state?.scene?.time].filter(
+    Boolean,
+  )
+  const scene = sceneParts.join(' · ')
+
   try {
     const result = await chatCompletion({
       apiBase: provider.apiBase,
@@ -943,15 +975,32 @@ playthroughRoutes.post('/:id/forks/regenerate', async (c) => {
             '1. 如果…… → 会把局面引向……',
             '2. ……',
             '3. ……',
-            '要求：三条要指向明显不同的处境，不是同义改写；只写触发条件与方向，不写具体结果；不要输出正文，不要解释。',
+            '',
+            '【最关键的一条】三条都必须从这段正文的**最后一个动作或最后一句话**直接接下去。',
+            '写的时候要点名这一段里具体的人、具体的物、具体的地点：',
+            '「如果她没有松开手」远远好于「如果局面发生变化」。',
+            '',
+            '要求：三条要指向明显不同的处境，不是同义改写；',
+            '只写触发条件与方向，不写具体结果；不要输出正文，不要解释。',
             note ? `\n本次要求：${note}` : '',
           ].join('\n'),
         },
-        { role: 'user', content: `当前这段正文：\n\n${target.content}` },
+        {
+          role: 'user',
+          content: [
+            ...(scene ? [`这一拍收在：${scene}`, ''] : []),
+            '【正文最后一段（走向必须从这里接下去）】',
+            tail,
+            '',
+            '【更早的正文，仅供理解前因】',
+            target.content.slice(0, Math.max(0, target.content.length - 400)),
+          ].join('\n'),
+        },
       ],
       temperature: 0.95,
-      // 三条岔路本身只要一百来字，但推理模型会先把额度花在思考上
-      maxTokens: 6000,
+      // 三条岔路本身只要一百来字，但推理模型（gemini-4-argon 这类）
+      // 会把大半个额度花在思考上，给少了直接截断
+      maxTokens: 16000,
     })
 
     const forks = parseForksFromText(result.content)
