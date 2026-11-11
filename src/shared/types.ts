@@ -165,6 +165,8 @@ export interface PlaythroughDetail {
   stateRules: string
   /** 写作风格提示词 */
   writingStyle: string
+  /** 出文策略：auto 按模型名自动判断 / standard 单次三段 / shell 终端壳 + 二次算状态 */
+  strategy: 'auto' | 'standard' | 'shell'
   cast: Array<{ id: string; name: string; materialId: string | null; body: CardBody }>
   messages: PlayMessage[]
 }

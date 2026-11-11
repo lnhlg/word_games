@@ -13,7 +13,7 @@ export class LlmError extends Error {
   }
 }
 
-export type ReasoningEffort = 'low' | 'medium' | 'high'
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'max'
 
 export interface ChatOptions {
   apiBase: string
@@ -150,18 +150,19 @@ export async function chatCompletionStream(
     const detail =
       `finish_reason = ${finishReason ?? '未提供'}，` +
       `completion tokens = ${usage?.completion ?? 0}，` +
-      `reasoning tokens = ${reasoningChars > 0 ? '有（约 ' + reasoningChars + ' 字）' : '无'}`
+      `思考 ${reasoningChars > 0 ? '约 ' + reasoningChars + ' 字' : '无'}`
 
     if (finishReason === 'length') {
       throw new LlmError(
-        `模型输出被截断（${detail}）。额度可能全花在思考上了——调大 max_tokens，或换个不思考的模型。`,
+        `模型输出被截断（${detail}）。额度全花在思考上了——调大 max_tokens，或换个不思考的模型。`,
       )
     }
+    // 这里是 stop：额度没用完，模型想完就停了，一个字正文都没给
     throw new LlmError(
-      `模型返回了空内容（${detail}）。` +
-        (reasoningChars > 0
-          ? '它只输出了思考过程，正文被吃掉了。调大 max_tokens 再试。'
-          : '这个模型这一次什么都没给，重试或换模型。'),
+      reasoningChars > 0
+        ? `模型只在思考里写了正文，没输出出来（${detail}）。` +
+          '这不是额度问题，是它自己停下的。直接重试一次通常就好。'
+        : `模型返回了空内容（${detail}）。重试或换个模型。`,
     )
   }
 

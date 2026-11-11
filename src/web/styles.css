@@ -1872,3 +1872,33 @@ label.inline input {
 .beat-body {
   cursor: text;
 }
+
+/* 手工改状态 */
+.state-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.state-editor-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.state-editor-row label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.state-editor-row label span {
+  min-width: 90px;
+  color: var(--muted, #888);
+  font-size: 0.85em;
+}
+
+.state-editor-row input {
+  flex: 1;
+  min-width: 0;
+}

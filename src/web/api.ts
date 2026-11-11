@@ -189,10 +189,12 @@ export async function streamBeat(
   directive: string,
   onDelta: (text: string) => void,
   options: { rewrite?: string; replaceLast?: boolean } = {},
+  signal?: AbortSignal,
 ): Promise<Extract<BeatEvent, { type: 'done' }>> {
   const res = await fetch(`/api/playthroughs/${id}/beats`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal,
     body: JSON.stringify({
       directive,
       rewrite: options.rewrite ?? '',
@@ -310,6 +312,10 @@ export function importPlaythrough(
   })
 }
 
+export function resetPlaythrough(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/playthroughs/${id}/reset`, { method: 'POST' })
+}
+
 export function deletePlaythrough(id: string): Promise<{ ok: true }> {
   return request<{ ok: true }>(`/api/playthroughs/${id}`, { method: 'DELETE' })
 }
@@ -347,6 +353,16 @@ export function updateJailbreak(id: string, jailbreak: string): Promise<{ jailbr
   return request(`/api/playthroughs/${id}/jailbreak`, {
     method: 'PUT',
     body: JSON.stringify({ jailbreak }),
+  })
+}
+
+export function updateStrategy(
+  id: string,
+  strategy: 'auto' | 'standard' | 'shell',
+): Promise<{ strategy: string }> {
+  return request(`/api/playthroughs/${id}/strategy`, {
+    method: 'PUT',
+    body: JSON.stringify({ strategy }),
   })
 }
 
@@ -395,6 +411,18 @@ export function rewriteSelection(
     method: 'POST',
     body: JSON.stringify({ selected, instruction }),
     signal: AbortSignal.timeout(180_000),
+  })
+}
+
+/** 手工覆盖这一拍的角色状态。 */
+export function updateMessageState(
+  id: string,
+  messageId: string,
+  characters: Record<string, Record<string, string>>,
+): Promise<{ state: GameState }> {
+  return request(`/api/playthroughs/${id}/messages/${messageId}/state`, {
+    method: 'PUT',
+    body: JSON.stringify({ characters }),
   })
 }
 

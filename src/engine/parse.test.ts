@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { narrationOnly, parseBeat, detectRefusal } from './parse.ts'
+import { narrationOnly, parseBeat, detectRefusal , parseForksFromText } from './parse.ts'
 
 const FULL = `【正文】
 雨打在瓦上，密得像有人在天上撒豆子。黄蓉坐在灯下核账。
@@ -137,4 +137,25 @@ test('彻底不是 JSON 时仍然降级并警告', () => {
   const beat = parseBeat(raw)
   assert.equal(beat.state, undefined)
   assert.ok(beat.warnings.some((w) => w.includes('不是合法 JSON')))
+})
+
+test('岔路一条被写成三行时，按编号合并而不是拆成三条', () => {
+  const raw = [
+    '1. 如果黄蓉强压住那缕顺尾椎窜上的热流，',
+    '借着后退半步将袖中军报重新抽出，',
+    '冷声把话拨回城防粮饷 → 会把局面引向当面对峙。',
+    '2. 如果吕文德趋前越过她退开的半步 → 会把局面引向暗室压迫。',
+    '3. 如果脚步声再度逼近 → 会把局面引向军情交叠。',
+  ].join('\n')
+
+  const forks = parseForksFromText(raw)
+  assert.equal(forks.length, 3)
+  assert.ok(forks[0].trigger.includes('军报重新抽出'))
+  assert.equal(forks[0].toward, '会把局面引向当面对峙。')
+})
+
+test('岔路没有编号时仍按行切', () => {
+  const raw = '如果甲 → 走向甲\n如果乙 → 走向乙\n如果丙 → 走向丙'
+  const forks = parseForksFromText(raw)
+  assert.equal(forks.length, 3)
 })

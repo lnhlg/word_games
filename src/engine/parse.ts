@@ -54,14 +54,32 @@ export function parseForksFromText(text: string): Fork[] {
 }
 
 function parseForks(text: string): Fork[] {
-  const lines = text
+  const rawLines = text
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
 
+  // 有些模型把一条选项写成好几行（trigger 内部换行），
+  // 直接按行切会把一条拆成三截。有编号时按编号合并：
+  const numbered = rawLines.some((l) => /^[\d一二三]\s*[.、)）]/.test(l))
+  const items: string[] = []
+  if (numbered) {
+    for (const line of rawLines) {
+      if (/^[\d一二三]\s*[.、)）]/.test(line) || /^[-*·]\s*\d/.test(line)) {
+        items.push(line)
+      } else if (items.length > 0) {
+        items[items.length - 1] += ' ' + line
+      } else {
+        items.push(line)
+      }
+    }
+  } else {
+    items.push(...rawLines)
+  }
+
   const forks: Fork[] = []
-  for (const line of lines.slice(0, 6)) {
-    const cleaned = line.replace(/^\d+\s*[.、)）]\s*/, '').replace(/^[-*·]\s*/, '')
+  for (const line of items.slice(0, 6)) {
+    const cleaned = line.replace(/^[\d一二三]+\s*[.、)）]\s*/, '').replace(/^[-*·]\s*/, '')
     if (!cleaned) continue
 
     const parts = cleaned.split(/\s*(?:→|->|=>|—>)\s*/)
@@ -229,6 +247,16 @@ const REFUSAL_PATTERNS = [
   /As an AI (?:language )?model/i,
   /Your prompt requests/i,
   /requests the generation of/i,
+  /could not be submitted/i,
+  /Your prompt contains/i,
+  /This (?:request|prompt) (?:asks for|contains|involves)/i,
+  /I(?:'|’)m unable to (?:generate|create|write)/i,
+  /graphic depictions of/i,
+  /roleplay framework/i,
+  /I(?:'|’)m not going to/i,
+  /I can(?:'|')t help with (?:this|that)/i,
+  /prompt contains sensi/i,
+  /I(?:'|’)m unable to/i,
   /I(?:'|’)m not able to (?:help|assist|create|generate)/i,
   /我无法(?:满足|提供|协助|生成|继续)/,
   /作为(?:一个)?\s*AI/,

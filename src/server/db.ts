@@ -136,6 +136,9 @@ if (!playthroughColumns.some((c) => c.name === 'state_rules')) {
 if (!playthroughColumns.some((c) => c.name === 'writing_style')) {
   db.exec('ALTER TABLE playthroughs ADD COLUMN writing_style TEXT')
 }
+if (!playthroughColumns.some((c) => c.name === 'strategy')) {
+  db.exec("ALTER TABLE playthroughs ADD COLUMN strategy TEXT")
+}
 // 软删除：被替换掉的旧内容不真删，只标记
 
 /**
